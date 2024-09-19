@@ -7,14 +7,16 @@ use std::sync::mpsc;
 use std::sync::Arc;
 use std::{fs, process, time::SystemTime};
 
-use anyhow::{anyhow, bail, Result};
-use glob::glob;
+use anyhow::{bail, Result};
 use log::trace;
+
+use crate::subst::find_and_perform_subst;
 
 #[derive(Debug)]
 pub struct Makefile {
     pub working_directory: PathBuf,
     pub explicit: Vec<Arc<dyn Rule>>,
+    pub variables: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -247,61 +249,13 @@ impl Makefile {
         Ok(needs_update)
     }
 
-    fn run_subst(&self, subst: String) -> Result<String> {
-        if subst.starts_with("wildcard ") {
-            let (_, wildcard) = subst.split_once(' ').unwrap();
-            return glob(wildcard)?
-                .map(|p| p.map_err(|e| anyhow!(e)).map(|p| p.display().to_string()))
-                .collect::<Result<Vec<_>>>()
-                .map(|v| v.join(" "));
-        } else {
-            println!("TODO: {subst}");
-            todo!()
-        }
-    }
-
     // Apply any variable and function substitutions to the recipe command lines.
     fn pre_process_recipe(&self, recipe: &Recipe) -> Result<Recipe> {
         Ok(RefCell::new(
             recipe
                 .borrow()
                 .iter()
-                .map(|line| {
-                    let mut new_line = String::new();
-                    let mut chars = line.trim().chars();
-                    while let Some(c) = chars.next() {
-                        match c {
-                            '$' => {
-                                let Some(nc) = chars.next() else {
-                                    bail!("unexpected end of line");
-                                };
-
-                                let nc = match nc {
-                                    '$' => "$".into(),
-                                    '(' => {
-                                        let mut subst = String::new();
-                                        loop {
-                                            if let Some(sc) = chars.next() {
-                                                if sc == ')' {
-                                                    break self.run_subst(subst)?;
-                                                }
-                                                subst.push(sc);
-                                            } else {
-                                                bail!(
-                                                    "unexpected end of line looking for closing )"
-                                                )
-                                            }
-                                        }
-                                    }
-                                    nc => nc.to_string(),
-                                };
-                                new_line.push_str(&nc);
-                            }
-                            c => new_line.push(c),
-                        };
-                    }
-                    Ok(new_line)
-                })
+                .map(|line| find_and_perform_subst(line, &self.variables))
                 .collect::<Result<_>>()?,
         ))
     }
@@ -408,6 +362,7 @@ mod test {
                     recipe: vec!["touch lili".to_owned()].into(),
                 }),
             ],
+            variables: HashMap::new(),
         };
 
         let mut plan = ExecutionPlan::new();
@@ -449,12 +404,57 @@ mod test {
     }
 
     #[test]
+    fn test_substitutions() {
+        let makefile = indoc! {"
+            rsfiles := $(wildcard src/*.rs)
+            all:
+            	echo woohoo
+        "};
+
+        let mf = Parser::new(makefile, PathBuf::from("."))
+            .parse()
+            .expect("Failed to parse");
+
+        assert_eq!(
+            "src/main.rs src/makefile.rs src/parser.rs src/subst.rs",
+            mf.variables
+                .get("rsfiles")
+                .expect("no rsfiles in variables!")
+        );
+    }
+
+    #[test]
+    fn test_multilines() {
+        let makefile = indoc! {"
+            depends = gklog gkdial \
+                gksu
+            all:
+            	echo woohoo \
+            	    lala
+        "};
+
+        let mf = Parser::new(makefile, PathBuf::from("."))
+            .parse()
+            .expect("Failed to parse");
+
+        assert_eq!(
+            "gklog gkdial gksu",
+            mf.variables
+                .get("depends")
+                .expect("no depends in variables!")
+        );
+    }
+
+    #[test]
     fn test_recipe_preprocessing() {
         let makefile = indoc! {"
+            doesexist = makefiles are wild
             all:
             	@echo 'test for a very complex string here!!1 ?!  @ 3 %~'
             	touch $(wildcard src/*.rs)
             	echo this should be a shell variable: $$HOME
+            	echo this should just disappear: $(nonecziste)
+            	echo this should be properly replaced: -$(doesexist)-
         "};
 
         let mf = Parser::new(makefile, PathBuf::from("."))
@@ -476,8 +476,35 @@ mod test {
             "@echo 'test for a very complex string here!!1 ?!  @ 3 %~'"
         );
 
-        assert_eq!(recipe[1], "touch src/main.rs src/makefile.rs src/parser.rs");
+        assert_eq!(
+            recipe[1],
+            "touch src/main.rs src/makefile.rs src/parser.rs src/subst.rs"
+        );
 
         assert_eq!(recipe[2], "echo this should be a shell variable: $HOME");
+
+        assert_eq!(recipe[3], "echo this should just disappear: ");
+
+        assert_eq!(
+            recipe[4],
+            "echo this should be properly replaced: -makefiles are wild-"
+        );
+
+        let makefile = indoc! {"
+            all:
+            	@echo this is unimplemented: $(patsubst .c,.o,$(objects))
+        "};
+
+        let mf = Parser::new(makefile, PathBuf::from("."))
+            .parse()
+            .expect("Failed to parse");
+
+        let mut plan = ExecutionPlan::new();
+        let res = mf.make_for("all", None, &mut plan);
+        assert_eq!(res.is_err(), true);
+        assert_eq!(
+            format!("{}", res.unwrap_err()),
+            "unimplemented: patsubst .c,.o,$(objects)"
+        );
     }
 }

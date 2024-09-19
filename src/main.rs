@@ -6,6 +6,7 @@ use parser::Parser;
 
 mod makefile;
 mod parser;
+mod subst;
 
 pub fn with_path(path: impl AsRef<Path>) -> Result<Makefile> {
     let path = path.as_ref();

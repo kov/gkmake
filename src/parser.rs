@@ -1,6 +1,9 @@
 use std::{collections::HashMap, iter::Peekable, sync::Arc};
 
-use crate::makefile::{ExplicitRule, Makefile, PreReq, Rule, Target};
+use crate::{
+    makefile::{ExplicitRule, Makefile, PreReq, Rule, Target},
+    subst::find_and_perform_subst,
+};
 use glob::glob;
 use log::trace;
 use miette::{miette, LabeledSpan, Result};
@@ -50,6 +53,22 @@ impl<'a> Lexer<'a> {
     }
 }
 
+fn find_unescaped(s: &str, c: char) -> Option<usize> {
+    let mut remaining = &s[..];
+    let mut offset = 0;
+    while remaining.len() > 1 {
+        let (pos, _) = remaining.char_indices().find(|(_, rc)| *rc == c)?;
+
+        offset += pos + 1; // +1 to account for skipping this char
+        if pos == 0 || &remaining[pos - 1..pos] != "\\" {
+            return Some(offset);
+        }
+
+        remaining = &remaining[pos + 1..];
+    }
+    None
+}
+
 impl<'a> Iterator for Lexer<'a> {
     type Item = Result<Token<'a>>;
 
@@ -62,7 +81,7 @@ impl<'a> Iterator for Lexer<'a> {
             // If we are looking for the value of a variable, treat it as a string, read to
             // end of line.
             if matches!(self.state, LexerState::VariableValue) {
-                let newline = remaining.find('\n').unwrap_or_else(|| remaining.len());
+                let newline = find_unescaped(remaining, '\n').unwrap_or_else(|| remaining.len());
 
                 self.offset += newline;
                 self.state = LexerState::Start;
@@ -77,7 +96,6 @@ impl<'a> Iterator for Lexer<'a> {
             // Adjust offset here so we can just skip characters like whitespaces.
             self.offset += 1;
             let mut kind = match chars.next()? {
-                // FIXME: this should actually allow almost all characters...
                 'a'..='z' | 'A'..='Z' | '_' | '.' | '/' => TokenKind::Ident {
                     with_pattern: false,
                     with_glob: false,
@@ -90,6 +108,11 @@ impl<'a> Iterator for Lexer<'a> {
                     with_pattern: false,
                     with_glob: true,
                 },
+                '#' => {
+                    // Ignore the rest of the line for comments.
+                    self.offset += remaining.find('\n').unwrap_or_else(|| remaining.len());
+                    continue;
+                }
                 ':' => TokenKind::Colon,
                 '=' => TokenKind::Equal,
                 '\n' => TokenKind::NewLine,
@@ -112,18 +135,32 @@ impl<'a> Iterator for Lexer<'a> {
                     ref mut with_pattern,
                     ref mut with_glob,
                 } => {
+                    let mut include_next = false;
                     let non_ident = remaining
-                        .find(|c| match c {
-                            'a'..='z' | 'A'..='Z' | '0'..='9' | '_' | '.' | '/' => false,
-                            '%' => {
-                                *with_pattern = true;
-                                false
+                        .find(|c| {
+                            // We found a \, so we treat whatever comes
+                            // next as part of the ident.
+                            if include_next {
+                                include_next = false;
+                                return false;
                             }
-                            '*' => {
-                                *with_glob = true;
-                                false
+
+                            match c {
+                                ':' | '=' | '\n' | '\t' | ' ' => true,
+                                '\\' => {
+                                    include_next = true;
+                                    false
+                                }
+                                '%' => {
+                                    *with_pattern = true;
+                                    false
+                                }
+                                '*' => {
+                                    *with_glob = true;
+                                    false
+                                }
+                                _ => false,
                             }
-                            _ => true,
                         })
                         .unwrap_or_else(|| remaining.len());
 
@@ -249,6 +286,36 @@ impl<'a> Parser<'a> {
             self.rules.push(rule);
         }
 
+        // Colon tokens may be simple, :=, ::=. The latter 2 are actually assignment operators.
+        let mut is_simple_assignment = false;
+        let token = if token.kind == TokenKind::Colon {
+            let mut token = token;
+            if let Some(Ok(Token {
+                kind: TokenKind::Colon | TokenKind::Equal,
+                ..
+            })) = self.lexer.peek()
+            {
+                token = self.lexer.next().unwrap().unwrap();
+
+                if token.kind == TokenKind::Equal {
+                    is_simple_assignment = true;
+                }
+            }
+            if let Some(Ok(Token {
+                kind: TokenKind::Equal,
+                ..
+            })) = self.lexer.peek()
+            {
+                // This is a := or ::= assignment, we'll need to do
+                // substitution on this variable immediately.
+                is_simple_assignment = true;
+                token = self.lexer.next().unwrap().unwrap();
+            }
+            token
+        } else {
+            token
+        };
+
         // We have an operator token, we know enough to categorize this line,
         // so now we can finalize our parsing.
         match token.kind {
@@ -354,8 +421,17 @@ impl<'a> Parser<'a> {
                     .with_source_code(self.source.to_string()));
                 }
 
-                self.variables
-                    .insert(before[0].source.to_owned(), token.source.trim().to_owned());
+                let value = token.source.trim().to_owned();
+
+                // Simple assignment variables are expected to have their
+                // value substituted a single time, on declaration.
+                let value = if is_simple_assignment {
+                    find_and_perform_subst(value, &self.variables).map_err(|e| miette!(e))?
+                } else {
+                    value
+                };
+
+                self.variables.insert(before[0].source.to_owned(), value);
             }
             _ => unreachable!(),
         }
@@ -391,7 +467,7 @@ impl<'a> Parser<'a> {
                             token.offset..token.offset + token.source.len(),
                             "this token"
                         )],
-                        "unexpected token at the start of a line"
+                        "unexpected token"
                     }
                     .with_source_code(self.source.to_string()));
                 }
@@ -405,6 +481,7 @@ impl<'a> Parser<'a> {
         Ok(Makefile {
             working_directory: self.working_directory,
             explicit: self.rules,
+            variables: self.variables,
         })
     }
 }
@@ -473,7 +550,10 @@ mod test {
 
     #[test]
     fn test_parse() {
-        let parser = Parser::new("target target2: dep1 dep2\n", PathBuf::from("."));
+        let parser = Parser::new(
+            "# Simple makefile\ntarget target2: dep1 dep2\n",
+            PathBuf::from("."),
+        );
         let mf = parser.parse().expect("Failed to parse");
 
         let expected = indoc! {"
@@ -492,12 +572,12 @@ mod test {
         );
         let mf = parser.parse().expect("Failed to parse");
 
-        //assert_eq!(variables.len(), 1);
+        assert_eq!(mf.variables.len(), 1);
 
-        //assert_eq!(
-        //    variables.get("var").unwrap(),
-        //    "a very complex! {value} 314 here"
-        //);
+        assert_eq!(
+            mf.variables.get("var").unwrap(),
+            "a very complex! {value} 314 here"
+        );
 
         assert_eq!(mf.explicit.len(), 0);
     }
