@@ -365,9 +365,12 @@ impl Debug for dyn Rule {
 
 #[cfg(test)]
 mod test {
+    use indoc::indoc;
     use temp_dir::TempDir;
 
     use super::*;
+
+    use crate::parser::Parser;
 
     #[test]
     fn test_execution_plan() {
@@ -431,5 +434,50 @@ mod test {
         assert_eq!(expected, plan.goal_map);
 
         assert_eq!(vec!["lili".to_string()], plan.runnable_jobs);
+
+        let job = plan.runnable_jobs.pop().unwrap();
+        assert_eq!("lili", job);
+        plan.queue_waiting_jobs(job);
+
+        assert_eq!(vec!["lele".to_string()], plan.runnable_jobs);
+
+        let job = plan.runnable_jobs.pop().unwrap();
+        assert_eq!("lele", job);
+        plan.queue_waiting_jobs(job);
+
+        assert_eq!(vec!["lala".to_string()], plan.runnable_jobs);
+    }
+
+    #[test]
+    fn test_recipe_preprocessing() {
+        let makefile = indoc! {"
+            all:
+            	@echo 'test for a very complex string here!!1 ?!  @ 3 %~'
+            	touch $(wildcard src/*.rs)
+            	echo this should be a shell variable: $$HOME
+        "};
+
+        let mf = Parser::new(makefile, PathBuf::from("."))
+            .parse()
+            .expect("Failed to parse");
+
+        let mut plan = ExecutionPlan::new();
+        mf.make_for("all", None, &mut plan)
+            .expect("Failed building execution plan");
+
+        let Some(recipe) = plan.goal_map.get("all".into()) else {
+            panic!("Expected recipe for target all, but found none.")
+        };
+
+        let recipe = recipe.borrow();
+
+        assert_eq!(
+            recipe[0],
+            "@echo 'test for a very complex string here!!1 ?!  @ 3 %~'"
+        );
+
+        assert_eq!(recipe[1], "touch src/main.rs src/makefile.rs src/parser.rs");
+
+        assert_eq!(recipe[2], "echo this should be a shell variable: $HOME");
     }
 }
