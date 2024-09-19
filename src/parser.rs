@@ -326,7 +326,7 @@ impl<'a> Parser<'a> {
                             order_only: false,
                         })
                         .collect(),
-                    recipe: String::new().into(),
+                    recipe: vec![].into(),
                 });
 
                 self.current_rule = Some(rule);
@@ -480,7 +480,7 @@ mod test {
             [Rule(
                 targets = [Target { name: \"target\" }, Target { name: \"target2\" }]
                 pre_reqs = [PreReq { name: \"dep1\", order_only: false }, PreReq { name: \"dep2\", order_only: false }]
-                recipe = RefCell { value: \"\" }
+                recipe = RefCell { value: [] }
             )]"
         };
 
@@ -511,7 +511,7 @@ mod test {
             [Rule(
                 targets = [Target { name: \"src/main.rs\" }, Target { name: \"src/makefile.rs\" }]
                 pre_reqs = [PreReq { name: \"src/parser.rs\", order_only: false }, PreReq { name: \"Cargo.toml\", order_only: false }]
-                recipe = RefCell { value: \"\" }
+                recipe = RefCell { value: [] }
             )]"
         };
 
