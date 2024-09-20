@@ -407,6 +407,8 @@ mod test {
     fn test_substitutions() {
         let makefile = indoc! {"
             rsfiles := $(wildcard src/*.rs)
+            rsdirs := $(dir Cargo.toml src/ $(wildcard src/*.rs))
+            rsnotdirs := $(notdir Cargo.toml src/ $(wildcard src/*.rs))
             all:
             	echo woohoo
         "};
@@ -420,6 +422,18 @@ mod test {
             mf.variables
                 .get("rsfiles")
                 .expect("no rsfiles in variables!")
+        );
+
+        assert_eq!(
+            "./ src/ src/ src/ src/ src/",
+            mf.variables.get("rsdirs").expect("no rsdirs in variables!")
+        );
+
+        assert_eq!(
+            "Cargo.toml main.rs makefile.rs parser.rs subst.rs",
+            mf.variables
+                .get("rsnotdirs")
+                .expect("no rsdirs in variables!")
         );
     }
 
