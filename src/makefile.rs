@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -24,7 +25,7 @@ struct ExecutionPlan {
     preq_goal_map: HashMap<String, Vec<String>>,
     goal_preq_map: HashMap<String, Vec<String>>,
     goal_map: HashMap<String, Recipe>,
-    runnable_jobs: Vec<String>,
+    runnable_jobs: HashSet<String>,
 }
 
 impl ExecutionPlan {
@@ -33,7 +34,7 @@ impl ExecutionPlan {
             preq_goal_map: HashMap::new(),
             goal_preq_map: HashMap::new(),
             goal_map: HashMap::new(),
-            runnable_jobs: vec![],
+            runnable_jobs: HashSet::new(),
         }
     }
 
@@ -54,7 +55,7 @@ impl ExecutionPlan {
         self.goal_map.entry(goal.to_string()).or_insert(recipe);
 
         if wait_on.is_empty() {
-            self.runnable_jobs.push(goal.to_string());
+            self.runnable_jobs.insert(goal.to_string());
         } else {
             self.goal_preq_map
                 .entry(goal.to_string())
@@ -79,10 +80,18 @@ impl ExecutionPlan {
                 if pre_reqs.is_empty() {
                     trace!("all dependencies for {target} done, adding to runnable");
                     self.goal_preq_map.remove(&target);
-                    self.runnable_jobs.push(target);
+                    self.runnable_jobs.insert(target);
                 }
             }
         }
+    }
+
+    fn next_job(&mut self) -> Option<String> {
+        let Some(job) = self.runnable_jobs.iter().next().cloned() else {
+            return None;
+        };
+        self.runnable_jobs.remove(&job);
+        Some(job)
     }
 
     fn execute(mut self) -> Result<()> {
@@ -104,7 +113,7 @@ impl ExecutionPlan {
                 continue;
             }
 
-            let Some(job) = self.runnable_jobs.pop() else {
+            let Some(job) = self.next_job() else {
                 break;
             };
 
@@ -388,19 +397,25 @@ mod test {
 
         assert_eq!(expected, plan.goal_map);
 
-        assert_eq!(vec!["lili".to_string()], plan.runnable_jobs);
+        let mut runnable = HashSet::new();
+        runnable.insert("lili".to_string());
+        assert_eq!(runnable, plan.runnable_jobs);
 
-        let job = plan.runnable_jobs.pop().unwrap();
+        let job = plan.next_job().unwrap();
         assert_eq!("lili", job);
         plan.queue_waiting_jobs(job);
 
-        assert_eq!(vec!["lele".to_string()], plan.runnable_jobs);
+        let mut runnable = HashSet::new();
+        runnable.insert("lele".to_string());
+        assert_eq!(runnable, plan.runnable_jobs);
 
-        let job = plan.runnable_jobs.pop().unwrap();
+        let job = plan.next_job().unwrap();
         assert_eq!("lele", job);
         plan.queue_waiting_jobs(job);
 
-        assert_eq!(vec!["lala".to_string()], plan.runnable_jobs);
+        let mut runnable = HashSet::new();
+        runnable.insert("lala".to_string());
+        assert_eq!(runnable, plan.runnable_jobs);
     }
 
     #[test]
