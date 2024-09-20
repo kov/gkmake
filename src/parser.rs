@@ -53,7 +53,7 @@ impl<'a> Lexer<'a> {
     }
 }
 
-fn find_unescaped(s: &str, c: char) -> Option<usize> {
+pub fn find_unescaped(s: &str, c: char) -> Option<usize> {
     let mut remaining = &s[..];
     let mut offset = 0;
     while remaining.len() > 1 {

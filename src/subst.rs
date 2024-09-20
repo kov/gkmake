@@ -2,7 +2,7 @@ use anyhow::{anyhow, bail, Result};
 use glob::glob;
 use log::trace;
 
-use crate::parser::Variables;
+use crate::parser::{find_unescaped, Variables};
 
 fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
     let subst = subst.as_ref();
@@ -10,7 +10,6 @@ fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
     for unsupported in [
         // text
         "subst",
-        "patsubst",
         "strip",
         "findstring",
         "filter",
@@ -94,6 +93,42 @@ fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
             .filter(|p| !p.is_empty())
             .collect::<Vec<_>>()
             .join(" ")),
+        "patsubst" => {
+            let params: Vec<_> = params.split(',').collect();
+            if params.len() != 3 {
+                bail!("subst: wrong number of arguments {}", params.len());
+            }
+
+            let (pattern, replacement, items) = (params[0], params[1], params[2]);
+            let new_str = if let Some(wildcard) = find_unescaped(pattern, '%') {
+                let (prefix, suffix) = pattern.split_at(wildcard);
+                items
+                    .split_ascii_whitespace()
+                    .map(|item| {
+                        if item.starts_with(prefix) && item.ends_with(suffix) {
+                            let captured = item
+                                .strip_prefix(prefix)
+                                .unwrap()
+                                .strip_suffix(suffix)
+                                .unwrap();
+
+                            replacement.replacen('%', captured, 1)
+                        } else {
+                            replacement.into()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            } else {
+                items
+                    .split_ascii_whitespace()
+                    .map(|item| item.replace(pattern, replacement))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+
+            Ok(new_str)
+        }
         _ => subst_variable(subst, variables),
     }
 }

@@ -505,8 +505,32 @@ mod test {
         );
 
         let makefile = indoc! {"
+            sources = gklog.c gksu.c
             all:
-            	@echo this is unimplemented: $(patsubst .c,.o,$(objects))
+            	@echo objects: $(patsubst .c,.o,$(sources))
+        "};
+
+        let mf = Parser::new(makefile, PathBuf::from("."))
+            .parse()
+            .expect("Failed to parse");
+
+        let mut plan = ExecutionPlan::new();
+        mf.make_for("all", None, &mut plan).expect("Failed to make");
+
+        let Some(recipe) = plan.goal_map.get("all".into()) else {
+            panic!("Expected recipe for target all, but found none.")
+        };
+
+        let recipe = recipe.borrow();
+
+        assert_eq!(recipe[0], "@echo objects: gklog.o gksu.o");
+    }
+
+    #[test]
+    fn test_unsupported_function() {
+        let makefile = indoc! {"
+            all:
+            	@echo this is unsupported: $(call whatever)
         "};
 
         let mf = Parser::new(makefile, PathBuf::from("."))
@@ -518,7 +542,7 @@ mod test {
         assert_eq!(res.is_err(), true);
         assert_eq!(
             format!("{}", res.unwrap_err()),
-            "unimplemented: patsubst .c,.o,$(objects)"
+            "unimplemented: call whatever"
         );
     }
 }
