@@ -155,6 +155,9 @@ pub fn find_and_perform_subst(input: impl AsRef<str>, variables: &Variables) -> 
 
                 let nc = match nc {
                     '$' => "$".into(),
+                    '@' => "$@".into(), // Leave special rules variables alone.
+                    '<' => "$<".into(),
+                    '?' => "$?".into(),
                     '(' => {
                         let mut subst = String::new();
                         let mut nesting = 0;

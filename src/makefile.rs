@@ -41,9 +41,11 @@ impl ExecutionPlan {
     fn add_job(
         &mut self,
         goal: &str,
+        exists: bool,
         pre_req_for: Option<&str>,
         wait_on: Vec<String>,
-        recipe: Recipe,
+        pre_reqs: &[&str],
+        mut recipe: Recipe,
     ) {
         if let Some(pre_req_for) = pre_req_for {
             self.preq_goal_map
@@ -51,6 +53,18 @@ impl ExecutionPlan {
                 .or_insert(vec![])
                 .push(pre_req_for.to_string());
         }
+
+        // We have the recipe with all variables other than the special
+        // ones replaced at this point. Replace $@ and $< based on what
+        // triggered this job.
+        let outdated_preqs: Vec<_> = wait_on.iter().map(|s| s.as_str()).collect();
+        self.replace_auto_variables(
+            &mut recipe,
+            goal,
+            exists,
+            outdated_preqs.as_slice(),
+            pre_reqs,
+        );
 
         self.goal_map.entry(goal.to_string()).or_insert(recipe);
 
@@ -62,6 +76,34 @@ impl ExecutionPlan {
                 .or_insert(vec![])
                 .extend_from_slice(wait_on.as_slice());
         }
+    }
+
+    fn replace_auto_variables(
+        &self,
+        recipe: &mut Recipe,
+        target: &str,
+        exists: bool,
+        outdated_pre_reqs: &[&str],
+        pre_reqs: &[&str],
+    ) {
+        recipe.borrow_mut().iter_mut().for_each(|line| {
+            *line = line
+                .replace("$@", target)
+                .replace(
+                    "$<",
+                    pre_reqs.first().map(|s| s.to_owned()).unwrap_or_else(|| ""),
+                )
+                .replace(
+                    "$?", // Only outdated preqs, unless target does not exist, then all.
+                    pre_reqs
+                        .iter()
+                        .map(|s| *s)
+                        .filter(|preq| !exists || outdated_pre_reqs.contains(preq))
+                        .collect::<Vec<&str>>()
+                        .join(" ")
+                        .as_str(),
+                )
+        });
     }
 
     fn queue_waiting_jobs(&mut self, job: String) {
@@ -205,8 +247,10 @@ impl Makefile {
         };
 
         let goal_path = self.path_for_goal(goal);
+
         // Check if the target already exists and is up-to-date.
-        let (mut needs_update, goal_mtime) = if fs::exists(&goal_path)? {
+        let exists = fs::exists(&goal_path)?;
+        let (mut needs_update, goal_mtime) = if exists {
             trace!("Goal {goal} exists, may not need update...");
             (false, fs::metadata(&goal_path)?.modified()?)
         } else {
@@ -252,7 +296,18 @@ impl Makefile {
 
         if needs_update {
             let recipe = self.pre_process_recipe(rule.recipe());
-            plan.add_job(goal, required_for, wait_on, recipe?);
+            plan.add_job(
+                goal,
+                exists,
+                required_for,
+                wait_on,
+                rule.pre_reqs()
+                    .iter()
+                    .map(|preq| preq.name.as_str())
+                    .collect::<Vec<&str>>()
+                    .as_slice(),
+                recipe?,
+            );
         }
 
         Ok(needs_update)
@@ -478,12 +533,22 @@ mod test {
     fn test_recipe_preprocessing() {
         let makefile = indoc! {"
             doesexist = makefiles are wild
-            all:
+            all: a
             	@echo 'test for a very complex string here!!1 ?!  @ 3 %~'
             	touch $(wildcard src/*.rs)
             	echo this should be a shell variable: $$HOME
             	echo this should just disappear: $(nonecziste)
             	echo this should be properly replaced: -$(doesexist)-
+
+            a b c: d e
+            	touch $@ $<
+            	echo $?
+
+            d:
+            	touch d
+
+            e:
+            	touch e
         "};
 
         let mf = Parser::new(makefile, PathBuf::from("."))
@@ -519,6 +584,22 @@ mod test {
             "echo this should be properly replaced: -makefiles are wild-"
         );
 
+        assert_eq!(plan.goal_map.get("b".into()), None);
+
+        let Some(recipe) = plan.goal_map.get("a".into()) else {
+            panic!("Expected recipe for target a, but found none.")
+        };
+
+        let recipe = recipe.borrow();
+
+        assert_eq!(recipe[0], "touch a d");
+
+        assert_eq!(recipe[1], "echo d e");
+    }
+
+    #[test]
+    fn test_patsubst() {
+        // patsubst function
         let makefile = indoc! {"
             sources = gklog.c gksu.c
             all:
