@@ -18,7 +18,11 @@ struct Token<'a> {
 
 #[derive(Clone, Debug, PartialEq)]
 enum TokenKind {
-    Ident { with_pattern: bool, with_glob: bool },
+    Ident {
+        with_pattern: bool,
+        with_glob: bool,
+        with_substitution: bool,
+    },
     String,
     Colon,
     Equal,
@@ -26,7 +30,7 @@ enum TokenKind {
     RecipeLine,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum LexerState {
     Start,
     VariableValue,
@@ -99,14 +103,22 @@ impl<'a> Iterator for Lexer<'a> {
                 'a'..='z' | 'A'..='Z' | '_' | '.' | '/' => TokenKind::Ident {
                     with_pattern: false,
                     with_glob: false,
+                    with_substitution: false,
+                },
+                '$' => TokenKind::Ident {
+                    with_pattern: false,
+                    with_glob: false,
+                    with_substitution: true,
                 },
                 '%' => TokenKind::Ident {
                     with_pattern: true,
                     with_glob: false,
+                    with_substitution: false,
                 },
                 '*' => TokenKind::Ident {
                     with_pattern: false,
                     with_glob: true,
+                    with_substitution: false,
                 },
                 '#' => {
                     // Ignore the rest of the line for comments.
@@ -117,14 +129,19 @@ impl<'a> Iterator for Lexer<'a> {
                 '=' => TokenKind::Equal,
                 '\n' => TokenKind::NewLine,
                 '\t' => TokenKind::RecipeLine,
+                '\\' => {
+                    // Ignore the next character.
+                    self.offset += 1;
+                    continue;
+                }
                 c if c.is_whitespace() => continue,
-                _c => {
+                c => {
                     return Some(Err(miette! {
                         labels = vec![LabeledSpan::at(
-                            self.offset..self.offset + 1,
+                            self.offset - 1..self.offset,
                             "this character"
                         )],
-                        "unexpected character"
+                        "unexpected character '{c}' when starting parse pass"
                     }
                     .with_source_code(self.source.to_string())))
                 }
@@ -134,8 +151,11 @@ impl<'a> Iterator for Lexer<'a> {
                 TokenKind::Ident {
                     ref mut with_pattern,
                     ref mut with_glob,
+                    ref mut with_substitution,
                 } => {
+                    // We treat substitutions as idents. Handle these first.
                     let mut include_next = false;
+                    let mut bracket_depth = 0;
                     let non_ident = remaining
                         .find(|c| {
                             // We found a \, so we treat whatever comes
@@ -146,7 +166,7 @@ impl<'a> Iterator for Lexer<'a> {
                             }
 
                             match c {
-                                ':' | '=' | '\n' | '\t' | ' ' => true,
+                                ':' | '=' | '\n' | '\t' | ' ' => bracket_depth == 0,
                                 '\\' => {
                                     include_next = true;
                                     false
@@ -157,6 +177,18 @@ impl<'a> Iterator for Lexer<'a> {
                                 }
                                 '*' => {
                                     *with_glob = true;
+                                    false
+                                }
+                                '$' => {
+                                    *with_substitution = true;
+                                    false
+                                }
+                                '(' => {
+                                    bracket_depth += 1;
+                                    false
+                                }
+                                ')' => {
+                                    bracket_depth -= 1;
                                     false
                                 }
                                 _ => false,
@@ -333,6 +365,7 @@ impl<'a> Parser<'a> {
                 let TokenKind::Ident {
                     with_pattern,
                     with_glob: _,
+                    with_substitution: _,
                 } = before[0].kind
                 else {
                     unreachable!();
@@ -359,35 +392,52 @@ impl<'a> Parser<'a> {
                     }
                 }
 
-                let deglob = |token: &Token<'a>| {
+                let subst_or_deglob = |token: &Token<'a>| -> Result<Vec<String>> {
                     let TokenKind::Ident {
                         with_pattern: _,
                         with_glob,
+                        with_substitution,
                     } = token.kind
                     else {
                         unreachable!()
                     };
-                    if with_glob {
+                    if with_substitution {
+                        find_and_perform_subst(token.source, &self.variables)
+                            .map(|s| s.split_ascii_whitespace().map(|s| s.to_owned()).collect())
+                            .map_err(|e| miette!(e))
+                    } else if with_glob {
                         if let Ok(paths) = glob(token.source) {
-                            // FIXME: do we need to handle glob errors?
-                            paths.flatten().map(|p| p.display().to_string()).collect()
+                            paths
+                                .map(|p| p.map_err(|e| miette!(e)).map(|p| p.display().to_string()))
+                                .collect::<Result<Vec<_>>>()
                         } else {
-                            Vec::<String>::new()
+                            Ok(Vec::<String>::new())
                         }
                     } else {
-                        vec![token.source.to_owned()]
+                        Ok(vec![token.source.to_owned()])
                     }
                 };
 
+                // FIXME: ugh.
+                let before: Vec<String> = before
+                    .iter()
+                    .map(subst_or_deglob)
+                    .collect::<Result<Vec<Vec<String>>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+                let after: Vec<String> = after
+                    .iter()
+                    .map(subst_or_deglob)
+                    .collect::<Result<Vec<Vec<String>>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect();
+
                 let rule: Arc<dyn Rule> = Arc::new(ExplicitRule {
-                    targets: before
-                        .iter()
-                        .flat_map(deglob)
-                        .map(|p| Target { name: p })
-                        .collect(),
+                    targets: before.into_iter().map(|p| Target { name: p }).collect(),
                     pre_reqs: after
-                        .iter()
-                        .flat_map(deglob)
+                        .into_iter()
                         .map(|p| PreReq {
                             name: p,
                             order_only: false,
@@ -514,6 +564,7 @@ mod test {
             TokenKind::Ident {
                 with_pattern: false,
                 with_glob: false,
+                with_substitution: false,
             },
             "target",
             0,
@@ -523,6 +574,7 @@ mod test {
             TokenKind::Ident {
                 with_pattern: false,
                 with_glob: false,
+                with_substitution: false,
             },
             "target2",
             7,
@@ -533,6 +585,7 @@ mod test {
             TokenKind::Ident {
                 with_pattern: false,
                 with_glob: false,
+                with_substitution: false,
             },
             "dep1",
             16,
@@ -542,10 +595,30 @@ mod test {
             TokenKind::Ident {
                 with_pattern: false,
                 with_glob: false,
+                with_substitution: false,
             },
             "dep2",
             21,
         );
+    }
+
+    #[test]
+    fn test_substitution_on_targets() {
+        let parser = Parser::new(
+            "$(wildcard src/m*.rs): $(wildcard src/s*.rs) src/parser.rs\n",
+            PathBuf::from("."),
+        );
+        let mf = parser.parse().expect("Failed to parse");
+
+        let expected = indoc! {"
+            [Rule(
+                targets = [Target { name: \"src/main.rs\" }, Target { name: \"src/makefile.rs\" }]
+                pre_reqs = [PreReq { name: \"src/subst.rs\", order_only: false }, PreReq { name: \"src/parser.rs\", order_only: false }]
+                recipe = RefCell { value: [] }
+            )]"
+        };
+
+        assert_eq!(expected, format!("{:?}", mf.explicit));
     }
 
     #[test]
