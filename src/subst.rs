@@ -9,16 +9,15 @@ fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
 
     for unsupported in [
         // text
-        "subst",
-        "strip",
-        "findstring",
-        "filter",
-        "filter-out",
-        "sort",
-        "word",
-        "wordlist",
-        "firstword",
-        "lastword",
+        "subst ",
+        "strip ",
+        "findstring ",
+        "filter ",
+        "sort ",
+        "word ",
+        "wordlist ",
+        "firstword ",
+        "lastword ",
         // filename manipulation
         "suffix ",
         "basename ",
@@ -28,24 +27,24 @@ fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
         "realpath ",
         "abspath ",
         // conditionals
-        "if",
-        "or",
-        "and",
-        "intcmp",
+        "if ",
+        "or ",
+        "and ",
+        "intcmp ",
         // scripting
-        "foreach",
-        "file",
-        "call",
-        "value",
-        "eval",
-        "origin",
-        "flavor",
-        "shell",
-        "guile",
+        "foreach ",
+        "file ",
+        "call ",
+        "value ",
+        "eval ",
+        "origin ",
+        "flavor ",
+        "shell ",
+        "guile ",
         // logging / panic
-        "info",
-        "warn",
-        "error",
+        "info ",
+        "warn ",
+        "error ",
     ] {
         if subst.starts_with(unsupported) {
             bail!("unimplemented: {subst}");
@@ -61,38 +60,25 @@ fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
 
     trace!("{subst} -> {params}");
     match func {
-        "wildcard" => glob(&params)?
-            .map(|p| p.map_err(|e| anyhow!(e)).map(|p| p.display().to_string()))
-            .collect::<Result<Vec<_>>>()
-            .map(|v| v.join(" ")),
-        "dir" => Ok(params
-            .split_ascii_whitespace()
-            .map(|p| {
-                if let Some((pos, _)) = p.char_indices().rfind(|(_, c)| *c == '/') {
-                    (&p[..pos + 1]).to_string()
-                } else {
-                    "./".into()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")),
-        "notdir" => Ok(params
-            .split_ascii_whitespace()
-            .map(|p| {
-                if p.ends_with('/') {
-                    "".to_string()
-                } else {
-                    if let Some((pos, _)) = p.char_indices().rfind(|(_, c)| *c == '/') {
-                        // We handle the case in which / is the last char above.
-                        (&p[pos + 1..]).to_string()
-                    } else {
-                        p.into()
-                    }
-                }
-            })
-            .filter(|p| !p.is_empty())
-            .collect::<Vec<_>>()
-            .join(" ")),
+        // text
+        "filter-out" => {
+            let params: Vec<_> = params.split(',').collect();
+            if params.len() != 2 {
+                bail!("filter-out: wrong number of arguments {}", params.len());
+            }
+
+            let (exclude, list) = (
+                params[0].split_ascii_whitespace().collect::<Vec<&str>>(),
+                params[1].split_ascii_whitespace().collect::<Vec<&str>>(),
+            );
+
+            Ok(list
+                .iter()
+                .filter(|item| !exclude.contains(item))
+                .map(|i| *i)
+                .collect::<Vec<&str>>()
+                .join(" "))
+        }
         "patsubst" => {
             let params: Vec<_> = params.split(',').collect();
             if params.len() != 3 {
@@ -129,6 +115,39 @@ fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
 
             Ok(new_str)
         }
+        // filename manipulation
+        "wildcard" => glob(&params)?
+            .map(|p| p.map_err(|e| anyhow!(e)).map(|p| p.display().to_string()))
+            .collect::<Result<Vec<_>>>()
+            .map(|v| v.join(" ")),
+        "dir" => Ok(params
+            .split_ascii_whitespace()
+            .map(|p| {
+                if let Some((pos, _)) = p.char_indices().rfind(|(_, c)| *c == '/') {
+                    (&p[..pos + 1]).to_string()
+                } else {
+                    "./".into()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")),
+        "notdir" => Ok(params
+            .split_ascii_whitespace()
+            .map(|p| {
+                if p.ends_with('/') {
+                    "".to_string()
+                } else {
+                    if let Some((pos, _)) = p.char_indices().rfind(|(_, c)| *c == '/') {
+                        // We handle the case in which / is the last char above.
+                        (&p[pos + 1..]).to_string()
+                    } else {
+                        p.into()
+                    }
+                }
+            })
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")),
         _ => subst_variable(subst, variables),
     }
 }

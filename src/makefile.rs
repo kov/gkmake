@@ -598,8 +598,32 @@ mod test {
     }
 
     #[test]
+    fn test_filter_out() {
+        let makefile = indoc! {"
+            sources = gklog.c gksu.c gnome.c kde.cpp
+            nongk = gnome.c kde.cpp
+            all:
+            	@echo $(filter-out $(nongk),$(sources))
+        "};
+
+        let mf = Parser::new(makefile, PathBuf::from("."))
+            .parse()
+            .expect("Failed to parse");
+
+        let mut plan = ExecutionPlan::new();
+        mf.make_for("all", None, &mut plan).expect("Failed to make");
+
+        let Some(recipe) = plan.goal_map.get("all".into()) else {
+            panic!("Expected recipe for target all, but found none.")
+        };
+
+        let recipe = recipe.borrow();
+
+        assert_eq!(recipe[0], "@echo gklog.c gksu.c");
+    }
+
+    #[test]
     fn test_patsubst() {
-        // patsubst function
         let makefile = indoc! {"
             sources = gklog.c gksu.c
             all:
