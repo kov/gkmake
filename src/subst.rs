@@ -1,3 +1,5 @@
+use std::process;
+
 use anyhow::{anyhow, bail, Result};
 use glob::glob;
 use log::trace;
@@ -39,7 +41,6 @@ fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
         "eval ",
         "origin ",
         "flavor ",
-        "shell ",
         "guile ",
         // logging / panic
         "info ",
@@ -148,6 +149,17 @@ fn run_subst(subst: impl AsRef<str>, variables: &Variables) -> Result<String> {
             .filter(|p| !p.is_empty())
             .collect::<Vec<_>>()
             .join(" ")),
+        // scripting
+        "shell" => process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(params)
+            .output()
+            .map(|output| {
+                String::from_utf8_lossy(output.stdout.as_slice())
+                    .trim()
+                    .to_string()
+            })
+            .map_err(|e| anyhow!(e)),
         _ => subst_variable(subst, variables),
     }
 }

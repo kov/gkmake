@@ -245,6 +245,14 @@ pub struct Parser<'a> {
 
 impl<'a> Parser<'a> {
     pub fn new(source: &'a str, working_directory: PathBuf) -> Self {
+        let mut variables = HashMap::new();
+
+        // Load variables with the automatically provided ones.
+        variables.insert(
+            "srcdir".to_string(),
+            working_directory.display().to_string(),
+        );
+
         Parser {
             source,
             lexer: Lexer::new(source).peekable(),
@@ -252,7 +260,7 @@ impl<'a> Parser<'a> {
             working_directory,
 
             rules: vec![],
-            variables: HashMap::new(),
+            variables,
 
             current_rule: None,
         }
@@ -371,7 +379,7 @@ impl<'a> Parser<'a> {
                     unreachable!();
                 };
 
-                for ident in before.iter().chain(after.iter()) {
+                for ident in before.iter() {
                     let TokenKind::Ident {
                         with_pattern: ident_with_pattern,
                         ..
@@ -471,7 +479,8 @@ impl<'a> Parser<'a> {
                     .with_source_code(self.source.to_string()));
                 }
 
-                let value = token.source.trim().to_owned();
+                // We may have eaten some escaped newlines, replace them with a space.
+                let value = token.source.trim().replace("\\\n", " ");
 
                 // Simple assignment variables are expected to have their
                 // value substituted a single time, on declaration.
@@ -605,7 +614,11 @@ mod test {
     #[test]
     fn test_substitution_on_targets() {
         let parser = Parser::new(
-            "$(wildcard src/m*.rs): $(wildcard src/s*.rs) src/parser.rs\n",
+            concat!(
+                "PARSER = $(srcdir)/src/parser.rs\n",
+                "$(wildcard src/m*.rs): $(wildcard src/s*.rs) src/parser.rs\n",
+                "$(srcdir)/src/main.rs: $(PARSER)\n"
+            ),
             PathBuf::from("."),
         );
         let mf = parser.parse().expect("Failed to parse");
@@ -614,6 +627,10 @@ mod test {
             [Rule(
                 targets = [Target { name: \"src/main.rs\" }, Target { name: \"src/makefile.rs\" }]
                 pre_reqs = [PreReq { name: \"src/subst.rs\", order_only: false }, PreReq { name: \"src/parser.rs\", order_only: false }]
+                recipe = RefCell { value: [] }
+            ), Rule(
+                targets = [Target { name: \"./src/main.rs\" }]
+                pre_reqs = [PreReq { name: \"./src/parser.rs\", order_only: false }]
                 recipe = RefCell { value: [] }
             )]"
         };
@@ -645,7 +662,7 @@ mod test {
         );
         let mf = parser.parse().expect("Failed to parse");
 
-        assert_eq!(mf.variables.len(), 1);
+        assert_eq!(mf.variables.len(), 2); // 2 because we now have our first make-supplied one
 
         assert_eq!(
             mf.variables.get("var").unwrap(),
