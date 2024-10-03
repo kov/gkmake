@@ -1,4 +1,8 @@
-use std::{fs, io, path::Path};
+use std::{
+    env, fs,
+    io::{self, BufRead, BufReader},
+    path::Path,
+};
 
 use makefile::Makefile;
 use miette::{bail, miette, IntoDiagnostic, Result};
@@ -25,7 +29,22 @@ pub fn with_path(path: impl AsRef<Path>) -> Result<Makefile> {
         )));
     }
 
-    let contents = fs::read_to_string(path).into_diagnostic()?;
+    // TODO: this handles includes naively. Will make the miette spans wrong, as they
+    // will point to the post-processed file and not know about includes at all. It
+    // also doesn't handle nested includes.
+    let mut contents = String::new();
+    let file = BufReader::new(fs::File::open(path).into_diagnostic()?);
+    let mut lines = file.lines();
+    while let Some(line) = lines.next() {
+        let line = line.into_diagnostic()?;
+        if line.starts_with("include ") {
+            let (_, include_path) = line.split_once(' ').unwrap();
+            contents.push_str(fs::read_to_string(include_path).into_diagnostic()?.as_str());
+        } else {
+            contents.push_str(&line);
+        }
+        contents.push('\n');
+    }
 
     // Safe to unwrap here as we already checked that the path
     // is to a file, so it must have a parent.
@@ -57,5 +76,9 @@ fn main() -> Result<()> {
         bail!("No targets.");
     };
 
-    mf.make(&goal.name).map_err(|e| miette!(e))
+    if let Some(user_provided) = env::args().nth(1) {
+        mf.make(&user_provided).map_err(|e| miette!(e))
+    } else {
+        mf.make(&goal.name).map_err(|e| miette!(e))
+    }
 }

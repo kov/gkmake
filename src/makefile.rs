@@ -237,15 +237,6 @@ impl Makefile {
     ) -> Result<bool> {
         trace!("Trying to make {goal} required for: {required_for:?}");
 
-        // Start by checking our explicit targets.
-        let Some(rule) = self.explicit.iter().find(|rule| rule.can_make(goal)) else {
-            if let Some(required_for) = required_for {
-                bail!("No rule to make '{goal}', required for {required_for}.")
-            } else {
-                bail!("No rule to make '{goal}'.")
-            }
-        };
-
         let goal_path = self.path_for_goal(goal);
 
         // Check if the target already exists and is up-to-date.
@@ -259,55 +250,68 @@ impl Makefile {
         };
 
         let mut wait_on = vec![];
-        for preq in rule.pre_reqs().iter() {
-            let preq_goal = &preq.name;
-            let preq_path = self.path_for_goal(preq_goal);
 
-            if !fs::exists(&preq_path)? {
-                if !preq.order_only {
-                    trace!(
+        // Start by checking our explicit targets.
+        if let Some(rule) = self.explicit.iter().find(|rule| rule.can_make(goal)) {
+            for preq in rule.pre_reqs().iter() {
+                let preq_goal = &preq.name;
+                let preq_path = self.path_for_goal(preq_goal);
+
+                if !fs::exists(&preq_path)? {
+                    if !preq.order_only {
+                        trace!(
                         "Prerequisite {preq_goal} does not exist. Must make {preq_goal} and {goal}."
                     );
-                    needs_update = true;
-                } else {
-                    trace!(
+                        needs_update = true;
+                    } else {
+                        trace!(
                         "Prerequisite {preq_goal} does not exist. Must make order-only {preq_goal}."
                     );
-                }
-            } else if !preq.order_only && fs::metadata(preq_path)?.modified()? > goal_mtime {
-                trace!("Prerequisite {preq_goal} was modified after {goal}, must make {goal}.");
-                needs_update = true;
-            }
-
-            // This is not only here to make the target if it doesn't exist,
-            // but also to check if one of the prerequisites of our prereqs
-            // also require the dep to be remade.
-            let remade = self.make_for(preq_goal, Some(goal), plan)?;
-
-            if remade {
-                wait_on.push(preq_goal.to_string());
-
-                if !preq.order_only {
-                    trace!("Prerequisite {preq_goal} was made and is not for order only, must make {goal}.");
+                    }
+                } else if !preq.order_only && fs::metadata(preq_path)?.modified()? > goal_mtime {
+                    trace!("Prerequisite {preq_goal} was modified after {goal}, must make {goal}.");
                     needs_update = true;
                 }
-            }
-        }
 
-        if needs_update {
-            let recipe = self.pre_process_recipe(rule.recipe());
-            plan.add_job(
-                goal,
-                exists,
-                required_for,
-                wait_on,
-                rule.pre_reqs()
-                    .iter()
-                    .map(|preq| preq.name.as_str())
-                    .collect::<Vec<&str>>()
-                    .as_slice(),
-                recipe?,
-            );
+                // This is not only here to make the target if it doesn't exist,
+                // but also to check if one of the prerequisites of our prereqs
+                // also require the dep to be remade.
+                let remade = self.make_for(preq_goal, Some(goal), plan)?;
+
+                if remade {
+                    wait_on.push(preq_goal.to_string());
+
+                    if !preq.order_only {
+                        trace!("Prerequisite {preq_goal} was made and is not for order only, must make {goal}.");
+                        needs_update = true;
+                    }
+                }
+            }
+
+            if needs_update {
+                let recipe = self.pre_process_recipe(rule.recipe());
+                plan.add_job(
+                    goal,
+                    exists,
+                    required_for,
+                    wait_on,
+                    rule.pre_reqs()
+                        .iter()
+                        .map(|preq| preq.name.as_str())
+                        .collect::<Vec<&str>>()
+                        .as_slice(),
+                    recipe?,
+                );
+            }
+        } else {
+            // We have no rule and the dependency does not exist already, nothing we can do.
+            if !exists {
+                if let Some(required_for) = required_for {
+                    bail!("No rule to make '{goal}', required for {required_for}.")
+                } else {
+                    bail!("No rule to make '{goal}'.")
+                }
+            }
         }
 
         Ok(needs_update)
@@ -620,6 +624,29 @@ mod test {
         let recipe = recipe.borrow();
 
         assert_eq!(recipe[0], "@echo gklog.c gksu.c");
+    }
+
+    #[test]
+    fn test_shell() {
+        let makefile = indoc! {"
+            all:
+            	@echo $(shell ls /etc/passwd)
+        "};
+
+        let mf = Parser::new(makefile, PathBuf::from("."))
+            .parse()
+            .expect("Failed to parse");
+
+        let mut plan = ExecutionPlan::new();
+        mf.make_for("all", None, &mut plan).expect("Failed to make");
+
+        let Some(recipe) = plan.goal_map.get("all".into()) else {
+            panic!("Expected recipe for target all, but found none.")
+        };
+
+        let recipe = recipe.borrow();
+
+        assert_eq!(recipe[0], "@echo /etc/passwd");
     }
 
     #[test]
